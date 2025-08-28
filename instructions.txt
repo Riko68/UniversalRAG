@@ -1,0 +1,142 @@
+Conda environment : GraphRAGPDF
+
+pip install pymupdf
+pip install "camelot-py[cv]"
+pip install python-dotenv
+pip install "openai>=1.0.0,<2"
+
+set OPENAI_API_KEY=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
+
+
+pip install neo4j
+LINUX:
+export NEO4J_URI=bolt://localhost:7687
+export NEO4J_USER=neo4j
+export NEO4J_PASSWORD=letmein!
+
+WINDOWS:
+set NEO4J_URI=bolt://localhost:7687
+set NEO4J_USER=neo4j
+set NEO4J_PASSWORD=letmein!
+
+
+# when running from VM
+python viewer_app.py --articles ./out/articles.jsonl --bind 0.0.0.0 --port 7860 --auth user:pass
+# When running local
+python viewer_app.py --articles ./out/articles.jsonl --bind 127.0.0.1 --port 7860
+
+
+python to_graphrag_jsonl.py --articles ./out/articles.jsonl --out ./graphrag_input.jsonl
+python viewer_app.py --articles ./out/articles.jsonl --bind 0.0.0.0 --port 7860 --auth user:pass
+
+
+
+
+# 1) PDF → article records (already done earlier)
+python pdf2articles.py --pdfs .\pdfs --out .\out --jurisdiction CH --lang fr
+
+# 2) (Optional) Table extraction
+pip install "camelot-py[cv]"  # or: pip install pdfplumber
+python tables_pass.py --articles .\out\articles.jsonl --out .\out
+
+docker run --rm -p 7474:7474 -p 7687:7687 -e NEO4J_AUTH=neo4j/letmein! neo4j:5
+
+# 3) Load document/article spine
+python neo4j_loader.py --articles .\out\articles.jsonl --uri bolt://127.0.0.1:7687 --user neo4j --password <pwd>
+
+# 4a) LLM Events (recommended)
+set OPENAI_API_KEY=<your_key>
+python event_extractor_llm.py --articles .\out\articles.jsonl --out .\out\events_llm.jsonl --model gpt-4o-mini --verbose
+python neo4j_events_loader.py --events .\out\events_llm.jsonl --uri bolt://127.0.0.1:7687 --user neo4j --password letmein!
+
+# 4b) (Optional) Heuristic events baseline
+python event_extractor.py --articles .\out\articles.jsonl --out .\out\events.jsonl
+python neo4j_events_loader.py --events .\out\events.jsonl --uri bolt://127.0.0.1:7687 --user neo4j --password <pwd>
+
+# 5) Ask questions via Text→Cypher
+python text2cypher_agent.py --uri bolt://127.0.0.1:7687 --user neo4j --password letmein! --question "Quelles sont les règles de navigation en Suisse sur les lacs?"
+python text2cypher_agent.py --uri bolt://127.0.0.1:7687 --user neo4j --password "letmein!" --question "Quelles sont les règles de navigation en Suisse sur les lacs?" --model gpt-4o-mini --language fr --verbose
+
+# 6) Visual review
+python viewer_app.py --articles .\out\articles.jsonl --bind 127.0.0.1 --port 7860
+
+# 7) To later add more files:
+python ingest_incremental.py --pdfs .\pdfs --out .\out --jurisdiction CH --lang fr
+python neo4j_loader.py --articles .\out\articles.jsonl --uri bolt://127.0.0.1:7687 --user neo4j --password "letmein!"
+python event_extractor_llm.py --articles .\out\articles.jsonl --out .\out\events_llm.jsonl --model gpt-4o-mini --verbose
+python neo4j_events_loader.py --events .\out\events_llm.jsonl --uri bolt://127.0.0.1:7687 --user neo4j --password "letmein!"
+
+
+Will it “know” which files are new?
+With Option A, it just appends; Neo4j’s MERGE prevents duplicates at the graph level for Documents/Articles. Events are also deduped now because of the hash-based event_id I added.
+
+With Option B, the ingestor itself only processes new/changed PDFs (best experience).
+
+Tips for clean incrementals
+Keep filenames stable (we use filename as doc_id by default). If you must rename a PDF, it will be treated as a new doc_id.
+
+If you want stable IDs independent of filename, we can switch doc_id to the file’s MD5 or a metadata field you provide (e.g., Fedlex ELI). Say the word and I’ll update pdf2articles.py accordingly.
+
+----------------------------------------
+If you ever need to rebuild from scratch, delete:
+
+.\out\articles.jsonl
+
+.\out\ingest_manifest.json
+
+and (optionally) clear nodes in Neo4j:
+
+
+MATCH (n:Event) DETACH DELETE n;
+MATCH (n:Article) DETACH DELETE n;
+MATCH (n:Document) DETACH DELETE n;
+
+
+--------------------------------------------
+FULL END TO END
+
+# Extract articles from PDF(s)
+python pdf2articles.py --pdfs .\pdfs --out .\out --jurisdiction CH --lang fr
+
+# Extract events from articles
+python event_extractor_llm.py --articles .\out\articles.jsonl --out .\out\events_llm.jsonl --model gpt-4o-mini --verbose
+
+# Run the Neo4j server:
+docker run --rm -p 7474:7474 -p 7687:7687 -e NEO4J_AUTH=neo4j/letmein! neo4j:5
+
+# Load into Neo4j:
+python neo4j_loader.py --articles ./out/articles.jsonl --uri bolt://127.0.0.1:7687 --user neo4j --password "letmein!"
+
+# Load events:
+python neo4j_events_loader.py --events ./out/events_llm.jsonl --uri bolt://127.0.0.1:7687 --user neo4j --password "letmein!"
+
+# Load full article text for search
+python neo4j_article_text_loader.py --articles ./out/articles.jsonl --uri bolt://127.0.0.1:7687 --user neo4j --password "letmein!" --chars 8000
+
+# Create full text index:
+python neo4j_fulltext_setup.py --uri bolt://127.0.0.1:7687 --user neo4j --password "letmein!"
+
+# Run app
+python chat_app.py
+
+
+# Trial query for validation
+CALL db.index.fulltext.queryNodes(
+  'articleText',
+  'navigation~2 OR lac* OR "eaux interieures" OR bateau OR regle OR securite'
+)
+YIELD node, score
+MATCH (d:Document)-[:HAS_ARTICLE]->(node)
+RETURN d.doc_id, node.article_number, node.title, node.page_start, node.page_end, score
+ORDER BY score DESC, node.page_start
+LIMIT 50;
+
+# Run the agent in normal mode (searching only in titles and event snippets):
+python text2cypher_agent.py --uri bolt://127.0.0.1:7687 --user neo4j --password "letmein!" --question "Quelles sont les règles de navigation sur les lacs?" --language fr --verbose
+
+# Run the agent in full text mode (inclusing the full text content)
+python text2cypher_agent.py --uri bolt://127.0.0.1:7687 --user neo4j --password "letmein!" --question "Quelles sont les règles de navigation sur les lacs?" --language fr --verbose --fulltext
+
+
+
+
